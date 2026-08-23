@@ -1,7 +1,6 @@
-<!-- ENTWURF - NICHT EINGEREICHT
-Ziel: github.com/modelcontextprotocol/modelcontextprotocol
-Kategorie: Ideas - Security
-OFFEN: Repo-URL. Ohne oeffentliches Repo ist "reproduzierbar" eine leere Behauptung.
+<!-- DRAFT - NOT YET SUBMITTED
+Target: github.com/modelcontextprotocol/modelcontextprotocol
+Category: Ideas - Security
 -->
 
 **Title:** Measured: `readOnlyHint` can be enforced at runtime, and doing so shows the hint alone is not enough
