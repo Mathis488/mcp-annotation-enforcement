@@ -87,6 +87,12 @@ Stated as measured, not as caveats.
 5. **Threefold resource cost**, since the target server runs three times.
 6. **A new single point of failure** in the call path.
 
+## Discussion
+
+Submitted to the MCP community as
+[discussion #3299](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3299)
+(Ideas – Security), 23 August 2026.
+
 ## Open question
 
 The Tool Annotations Interest Group (Microsoft, OpenAI, AWS, Cloudflare,

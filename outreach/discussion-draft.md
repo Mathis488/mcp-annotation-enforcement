@@ -1,5 +1,5 @@
-<!-- DRAFT - NOT YET SUBMITTED
-Target: github.com/modelcontextprotocol/modelcontextprotocol
+<!-- SUBMITTED 2026-08-23 as discussion #3299
+https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3299
 Category: Ideas - Security
 -->
 
