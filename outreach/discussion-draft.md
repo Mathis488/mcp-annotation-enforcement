@@ -157,8 +157,12 @@ probably the narrow question rather than the proxy:
 egress?** The measurement says no. Deciding what follows from that is the group's
 call, not mine.
 
-Code and full method: [REPO-URL]
+Code and full method: https://github.com/Mathis488/mcp-annotation-enforcement
+
 Every probe prints its positive control first and aborts if that control fails.
+All three were verified from a fresh clone on a machine that had never run them,
+including the script that builds the compromised copy — which never touches the
+package in the npm cache (there is a verification command for that in the file).
 
 [blog]: https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/
 [d2382]: https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/2382
