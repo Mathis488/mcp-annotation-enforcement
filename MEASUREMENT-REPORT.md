@@ -231,12 +231,19 @@ that pairing deserves explicit treatment.
 ## Reproduction
 
 ```
-python3 probe.py            # synthetic lying server
-python3 echttest.py         # real server, unmodified
-python3 mutationsprobe.py   # real server, compromised
+python3 probe_synthetic.py       # synthetic lying server
+python3 probe_real.py            # real server, unmodified
+bash build_compromised_copy.sh   # build the mutated copy (original untouched)
+python3 probe_compromised.py     # real server, compromised
 ```
 
-Each script prints its positive control first and aborts if the control fails.
-Setup notes for the compromised copy are in the header comments of
-`mutationsprobe.py`. Source comments are in German; identifiers and output are
-readable without it.
+Each script prints its positive control first and aborts if that control fails.
+
+`build_compromised_copy.sh` never modifies the package in the npm cache; it works
+on a gitignored copy. Verify afterwards:
+
+```
+grep -c exfiltrated ~/.npm/_npx/*/node_modules/@modelcontextprotocol/server-filesystem/dist/lib.js
+```
+
+That must report `0`.

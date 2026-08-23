@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-"""Durchsetzungs-Proxy fuer MCP-Werkzeug-Annotationen.
+"""Runtime enforcement proxy for MCP tool annotations.
 
-These: Eine Annotation wie readOnlyHint ist heute Selbstauskunft. Die
-MCP-Spezifikation sagt Clients ausdruecklich, sie MUESSEN sie als
-unvertrauenswuerdig behandeln -- und trotzdem haengt bei Google Cloud,
-Gemini Enterprise, VS Code, Codex und GitHub die Genehmigungsentscheidung
-genau daran.
+The MCP specification states that clients MUST consider tool annotations
+untrusted. In practice several major hosts route approval decisions through
+exactly those annotations -- so a server that lies gets waved through.
 
-Dieser Proxy PRUEFT die Behauptung nicht, er MACHT SIE WAHR:
+This proxy does not VERIFY the claim, it MAKES IT TRUE:
 
-    Der Zielserver wird ZWEIMAL gestartet.
-      Instanz "frei"      -- normal, bedient Werkzeuge ohne readOnlyHint.
-      Instanz "gefesselt" -- unter sandbox-exec ohne jedes Schreibrecht,
-                             bedient alle Werkzeuge mit readOnlyHint=True.
+    The target server is started three times, each under different privileges.
+      "free"       -- unmodified; serves tools without readOnlyHint.
+      "restrained" -- no filesystem write access; serves readOnlyHint=True.
+      "strict"     -- no writes AND no network; serves readOnlyHint=True
+                      combined with openWorldHint=False.
 
-    Ein ehrliches Nur-Lese-Werkzeug merkt keinen Unterschied.
-    Ein luegendes scheitert am Kernel, statt still zu loeschen.
+    An honest read-only tool notices no difference.
+    A lying one fails at the kernel instead of silently exfiltrating.
 
-Grenze, ausdruecklich benannt: sandbox-exec ist macOS-spezifisch und von
-Apple als deprecated markiert. Unter Linux waeren bubblewrap oder seccomp
-das Aequivalent. Die Architektur ist portabel, diese eine Umsetzung nicht.
+This follows the MCP maintainers' own position: "Hints inform decisions;
+contracts enforce them. ... the right place for that is the authorization
+layer, the transport, or the runtime rather than ToolAnnotations."
+(Hungerford, Morrow, Chang -- MCP blog, 2026-03-16)
+
+Stated limit: sandbox-exec is macOS-specific and deprecated by Apple. On
+Linux, bubblewrap or seccomp would be the equivalent. The architecture is
+portable; this particular implementation is not.
 """
 import json
 import os
@@ -28,9 +32,9 @@ import subprocess
 import sys
 import threading
 
-# Ohne diese Ausnahmen kann der gefesselte Prozess nicht einmal auf stdout
-# schreiben -- die Sandbox wuerde den Server erschlagen statt ihn zu binden.
-AUSNAHMEN = """(allow file-write*
+# Without these exceptions the sandboxed process cannot even write to stdout,
+# so the sandbox would kill the server rather than merely constrain it.
+WRITE_EXCEPTIONS = """(allow file-write*
   (literal "/dev/null")
   (literal "/dev/stdout")
   (literal "/dev/stderr")
@@ -38,162 +42,154 @@ AUSNAHMEN = """(allow file-write*
   (regex #"^/dev/tty"))
 """
 
-# Zwei Fesselungsgrade, weil zwei verschiedene Annotationen durchsetzbar sind:
-#   readOnlyHint=True                        -> Schreibrechte weg
-#   readOnlyHint=True UND openWorldHint=False -> zusaetzlich Netzrechte weg
-# Ohne die zweite Stufe bleibt eine gemessene Luecke offen: ein Werkzeug ohne
-# Schreibrechte kann weiterhin per Netzwerk exfiltrieren.
-PROFIL_LESEND = "(version 1)\n(allow default)\n(deny file-write*)\n" + AUSNAHMEN
-PROFIL_STRENG = "(version 1)\n(allow default)\n(deny file-write*)\n(deny network*)\n" + AUSNAHMEN
-
-_UNUSED = """(version 1)
-(allow default)
-(deny file-write*)
-(allow file-write*
-  (literal "/dev/null")
-  (literal "/dev/stdout")
-  (literal "/dev/stderr")
-  (regex #"^/dev/fd/")
-  (regex #"^/dev/tty"))
-"""
+# Two levels of restraint, because two different annotations are enforceable:
+#   readOnlyHint=True                         -> remove write access
+#   readOnlyHint=True AND openWorldHint=False -> also remove network access
+# Without the second level a measured gap stays open: a process stripped of
+# write access can still exfiltrate over the network.
+PROFILE_READONLY = "(version 1)\n(allow default)\n(deny file-write*)\n" + WRITE_EXCEPTIONS
+PROFILE_STRICT = ("(version 1)\n(allow default)\n(deny file-write*)\n"
+                  "(deny network*)\n" + WRITE_EXCEPTIONS)
 
 
-def protokoll(text):
-    """Diagnose geht nach stderr -- stdout gehoert dem JSON-RPC-Strom."""
+def log_line(text):
+    """Diagnostics go to stderr -- stdout belongs to the JSON-RPC stream."""
     sys.stderr.write(f"[proxy] {text}\n")
     sys.stderr.flush()
 
 
-class Instanz:
-    """Ein gestarteter Zielserver samt seinem JSON-RPC-Kanal."""
+class Instance:
+    """One running copy of the target server and its JSON-RPC channel."""
 
-    def __init__(self, befehl, name, gefesselt, profilpfad=None):
+    def __init__(self, command, name, restrained, profile_path=None):
         self.name = name
-        self.gefesselt = gefesselt
-        if gefesselt:
-            befehl = ["/usr/bin/sandbox-exec", "-f", profilpfad] + befehl
-        umgebung = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
-        self.prozess = subprocess.Popen(
-            befehl,
+        self.restrained = restrained
+        if restrained:
+            command = ["/usr/bin/sandbox-exec", "-f", profile_path] + command
+        environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        self.process = subprocess.Popen(
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
-            env=umgebung,
+            env=environment,
         )
-        self._schloss = threading.Lock()
+        self._lock = threading.Lock()
 
-    def senden_und_warten(self, anfrage):
-        """Eine Anfrage hin, die Antwort mit passender id zurueck."""
-        with self._schloss:
-            self.prozess.stdin.write(json.dumps(anfrage) + "\n")
-            self.prozess.stdin.flush()
-            if anfrage.get("id") is None:
-                return None  # Benachrichtigung, es kommt nichts zurueck
+    def send_and_wait(self, request):
+        """Send one request, return the response carrying the matching id."""
+        with self._lock:
+            self.process.stdin.write(json.dumps(request) + "\n")
+            self.process.stdin.flush()
+            if request.get("id") is None:
+                return None  # notification, nothing comes back
             while True:
-                zeile = self.prozess.stdout.readline()
-                if not zeile:
-                    raise RuntimeError(f"Instanz '{self.name}' ist gestorben")
+                line = self.process.stdout.readline()
+                if not line:
+                    raise RuntimeError(f"instance '{self.name}' died")
                 try:
-                    nachricht = json.loads(zeile)
+                    message = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if nachricht.get("id") == anfrage.get("id"):
-                    return nachricht
+                if message.get("id") == request.get("id"):
+                    return message
 
-    def beenden(self):
+    def shutdown(self):
         try:
-            self.prozess.stdin.close()
-            self.prozess.wait(timeout=3)
+            self.process.stdin.close()
+            self.process.wait(timeout=3)
         except Exception:
-            self.prozess.kill()
+            self.process.kill()
 
 
-class Durchsetzung:
-    def __init__(self, befehl, profilpfad):
-        self.frei = Instanz(befehl, "frei", gefesselt=False)
-        self.gefesselt = Instanz(befehl, "gefesselt", gefesselt=True,
-                                 profilpfad=profilpfad["lesend"])
-        self.streng = Instanz(befehl, "streng", gefesselt=True,
-                              profilpfad=profilpfad["streng"])
-        self.nur_lesend = set()   # readOnlyHint=True
-        self.geschlossen = set()  # readOnlyHint=True UND openWorldHint=False
-        self.geroutet = []        # Protokoll fuer die Auswertung
+class Enforcer:
+    def __init__(self, command, profile_paths):
+        self.free = Instance(command, "free", restrained=False)
+        self.restrained = Instance(command, "restrained", restrained=True,
+                                   profile_path=profile_paths["readonly"])
+        self.strict = Instance(command, "strict", restrained=True,
+                               profile_path=profile_paths["strict"])
+        self.read_only = set()    # readOnlyHint=True
+        self.closed_world = set() # readOnlyHint=True AND openWorldHint=False
+        self.routing_log = []
 
-    def beide(self, anfrage):
-        """Handshake und Benachrichtigungen gehen an beide Instanzen."""
-        antwort = self.frei.senden_und_warten(anfrage)
-        self.gefesselt.senden_und_warten(anfrage)
-        self.streng.senden_und_warten(anfrage)
-        return antwort
+    def to_all(self, request):
+        """Handshake and notifications go to every instance."""
+        response = self.free.send_and_wait(request)
+        self.restrained.send_and_wait(request)
+        self.strict.send_and_wait(request)
+        return response
 
-    def liste_holen(self, anfrage):
-        antwort = self.frei.senden_und_warten(anfrage)
-        self.gefesselt.senden_und_warten(anfrage)
-        self.streng.senden_und_warten(anfrage)
-        for werkzeug in antwort.get("result", {}).get("tools", []):
-            marken = werkzeug.get("annotations", {})
-            if marken.get("readOnlyHint") is True:
-                self.nur_lesend.add(werkzeug["name"])
-                if marken.get("openWorldHint") is False:
-                    self.geschlossen.add(werkzeug["name"])
-        protokoll(f"Annotationen gelesen: {len(self.nur_lesend)} behaupten nur zu lesen, "
-                  f"davon {len(self.geschlossen)} zusaetzlich ohne Aussenwelt")
-        return antwort
+    def fetch_tool_list(self, request):
+        response = self.free.send_and_wait(request)
+        self.restrained.send_and_wait(request)
+        self.strict.send_and_wait(request)
+        for tool in response.get("result", {}).get("tools", []):
+            annotations = tool.get("annotations", {})
+            if annotations.get("readOnlyHint") is True:
+                self.read_only.add(tool["name"])
+                if annotations.get("openWorldHint") is False:
+                    self.closed_world.add(tool["name"])
+        log_line(f"annotations read: {len(self.read_only)} claim to be read-only, "
+                 f"{len(self.closed_world)} of those also claim no outside world")
+        # tools/list is passed through unchanged: the client sees exactly the
+        # server's own declarations. The proxy adds no claims of its own.
+        return response
 
-    def aufruf_routen(self, anfrage):
-        name = anfrage.get("params", {}).get("name")
-        if name in self.geschlossen:
-            ziel, weg = self.streng, "STRENG (kein Schreiben, kein Netz)"
-        elif name in self.nur_lesend:
-            ziel, weg = self.gefesselt, "GEFESSELT (kein Schreiben)"
+    def route_call(self, request):
+        name = request.get("params", {}).get("name")
+        if name in self.closed_world:
+            target, route = self.strict, "STRICT (no writes, no network)"
+        elif name in self.read_only:
+            target, route = self.restrained, "RESTRAINED (no writes)"
         else:
-            ziel, weg = self.frei, "frei"
-        self.geroutet.append((name, weg))
-        protokoll(f"tools/call '{name}' -> Instanz {weg}")
-        return ziel.senden_und_warten(anfrage)
+            target, route = self.free, "free"
+        self.routing_log.append((name, route))
+        log_line(f"tools/call '{name}' -> {route}")
+        return target.send_and_wait(request)
 
-    def beenden(self):
-        self.frei.beenden()
-        self.gefesselt.beenden()
-        self.streng.beenden()
+    def shutdown(self):
+        self.free.shutdown()
+        self.restrained.shutdown()
+        self.strict.shutdown()
 
 
 def main():
     if len(sys.argv) < 2:
-        sys.stderr.write("Aufruf: proxy.py <server-befehl ...>\n")
+        sys.stderr.write("usage: proxy.py <server-command ...>\n")
         return 2
-    befehl = sys.argv[1:]
+    command = sys.argv[1:]
 
-    hier = os.path.dirname(os.path.abspath(__file__))
-    profilpfad = {}
-    for schluessel, inhalt in (("lesend", PROFIL_LESEND), ("streng", PROFIL_STRENG)):
-        pfad = os.path.join(hier, f"profil-{schluessel}.sb")
-        with open(pfad, "w") as f:
-            f.write(inhalt)
-        profilpfad[schluessel] = pfad
+    here = os.path.dirname(os.path.abspath(__file__))
+    profile_paths = {}
+    for key, content in (("readonly", PROFILE_READONLY), ("strict", PROFILE_STRICT)):
+        path = os.path.join(here, f"profile-{key}.sb")
+        with open(path, "w") as handle:
+            handle.write(content)
+        profile_paths[key] = path
 
-    protokoll(f"starte Zielserver zweifach: {shlex.join(befehl)}")
-    d = Durchsetzung(befehl, profilpfad)
+    log_line(f"starting target server three times: {shlex.join(command)}")
+    enforcer = Enforcer(command, profile_paths)
     try:
-        for zeile in sys.stdin:
-            zeile = zeile.strip()
-            if not zeile:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
                 continue
-            anfrage = json.loads(zeile)
-            methode = anfrage.get("method")
-            if methode == "tools/list":
-                antwort = d.liste_holen(anfrage)
-            elif methode == "tools/call":
-                antwort = d.aufruf_routen(anfrage)
+            request = json.loads(line)
+            method = request.get("method")
+            if method == "tools/list":
+                response = enforcer.fetch_tool_list(request)
+            elif method == "tools/call":
+                response = enforcer.route_call(request)
             else:
-                antwort = d.beide(anfrage)
-            if antwort is not None:
-                sys.stdout.write(json.dumps(antwort) + "\n")
+                response = enforcer.to_all(request)
+            if response is not None:
+                sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()
     finally:
-        d.beenden()
+        enforcer.shutdown()
     return 0
 
 

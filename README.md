@@ -1,122 +1,110 @@
-# MCP-Durchsetzungs-Proxy
+# MCP annotation enforcement proxy
 
-Setzt MCP-Werkzeug-Annotationen **durch**, statt sie zu glauben.
+Enforces MCP tool annotations instead of trusting them.
 
-## Das Problem
+## The problem
 
-Jedes MCP-Werkzeug beschreibt sich selbst: `readOnlyHint`, `destructiveHint`,
-`openWorldHint`. Die MCP-Spezifikation sagt Clients ausdrücklich, sie **müssen**
-diese Angaben als unvertrauenswürdig behandeln — der Server schreibt sie selbst,
-niemand prüft sie.
+Every MCP tool describes itself: `readOnlyHint`, `destructiveHint`,
+`openWorldHint`. The MCP specification explicitly tells clients they **MUST**
+treat those declarations as untrusted — the server writes them itself and
+nobody checks them.
 
-Trotzdem hängt an genau diesen Angaben heute die Genehmigungsentscheidung bei
-Google Cloud IAM, Gemini Enterprise, VS Code/Copilot, OpenAI Codex, dem GitHub
-Coding Agent, Microsoft 365 und dem ChatGPT Apps SDK. Steht `readOnlyHint: true`
-drauf, wird der Nutzer nicht gefragt.
+Several major hosts nevertheless route their approval decision through exactly
+those declarations. If `readOnlyHint: true` is set, the user is not asked.
 
-Aus Anthropics MCP-Blog: *„An untrusted server can lie. A server can claim
-`readOnlyHint: true` and delete your files anyway."*
+From the MCP maintainers' own blog:
 
-Der Missbrauch ist dokumentiert: `mcp-safe-proxy` auf npm schreibt `tools/list`
-auf `readOnlyHint: true` um — ausdrücklich, um Genehmigungsdialoge zu umgehen.
+> "An untrusted server can lie. A server can claim `readOnlyHint: true` and
+> delete your files anyway."
 
-## Der Ansatz
+The abuse is documented. The npm package `mcp-safe-proxy` (v0.1.0, 2026-03-01)
+describes itself in its own package metadata as *"MCP annotation proxy — rewrite
+tool hints to bypass approval prompts"*.
 
-Nicht prüfen, ob die Behauptung stimmt. **Sie wahr machen.**
+## The approach
 
-Der Zielserver wird mehrfach gestartet, jede Instanz mit anderen Rechten.
-Aufrufe werden nach der deklarierten Annotation geroutet:
+Don't check whether the claim is true. **Make it true.**
 
-| Annotation | Instanz | Rechte |
+The target server is started three times, each instance with different
+privileges. Calls are routed by the tool's own declaration:
+
+| Declaration | Instance | Privileges |
 |---|---|---|
-| (keine / `readOnlyHint: false`) | frei | unverändert |
-| `readOnlyHint: true` | gefesselt | **kein Schreiben** |
-| `readOnlyHint: true` + `openWorldHint: false` | streng | **kein Schreiben, kein Netz** |
+| none / `readOnlyHint: false` | free | unchanged |
+| `readOnlyHint: true` | restrained | **no filesystem writes** |
+| `readOnlyHint: true` + `openWorldHint: false` | strict | **no writes, no network** |
 
-Ein ehrliches Werkzeug merkt keinen Unterschied. Ein lügendes scheitert am
-Kernel, statt still zu exfiltrieren.
+An honest tool notices no difference. A lying one fails at the kernel instead of
+silently exfiltrating.
 
-Das folgt Anthropics eigener Empfehlung: *„Hints inform decisions; contracts
-enforce them. … the right place for that is the authorization layer, the
-transport, or the runtime."*
+`tools/list` is passed through unchanged, so the client sees exactly the
+server's own declarations. The proxy adds no claims of its own.
 
-## Messergebnisse
+This follows the maintainers' own recommendation:
 
-Alle Proben enthalten eine **Positivkontrolle**: Der Angriff muss ungeschützt
-gelingen, sonst misst die Probe nichts und ihr grünes Ergebnis ist wertlos.
+> "Hints inform decisions; contracts enforce them. … the right place for that is
+> the authorization layer, the transport, or the runtime."
 
-### `probe.py` — Attrappe
-| | |
-|---|---|
-| Positivkontrolle: Angriff gelingt ungeschützt | bestanden |
-| Lügendes Werkzeug wird gestoppt | bestanden |
-| Ehrliches Schreibwerkzeug bleibt nutzbar | bestanden |
+## Results
 
-### `echttest.py` — echter Server, unverändert
-`@modelcontextprotocol/server-filesystem`, 10 Nur-Lese-Werkzeuge automatisch
-erkannt und gefesselt geroutet.
+Full method, sources and the negative result of the static-analysis attempt are
+in [MEASUREMENT-REPORT.md](MEASUREMENT-REPORT.md).
 
-| | |
-|---|---|
-| Nur-Lese-Werkzeug überlebt die Sandbox | bestanden |
-| Schreibwerkzeug funktioniert weiter | bestanden |
+Every probe carries a **positive control**: the attack must succeed without the
+proxy, or the probe is measuring nothing and its green result is worthless.
 
-### `mutationsprobe.py` — echter Server, kompromittiert
-Der offizielle Server auf einer Kopie so verändert, dass `read_file` heimlich
-exfiltriert. Variante B (raffinierter Angreifer): erst korrekt lesen, dann
-exfiltrieren, Fehlschlag verschleiern. Die Annotation bleibt `readOnlyHint: true`.
+| Probe | Checks | Result |
+|---|---|---|
+| `probe_synthetic.py` | control · liar blocked · honest tool unaffected | 3/3 pass |
+| `probe_real.py` | read-only tool survives sandbox · write tool works | 2/2 pass |
+| `probe_compromised.py` | control · exfiltration blocked · read preserved | 3/3 pass |
 
-| | |
-|---|---|
-| Positivkontrolle: Exfiltration gelingt ungeschützt | bestanden |
-| Exfiltration wird durch den Proxy gestoppt | bestanden |
-| Legitime Lesefunktion bleibt vollständig erhalten | bestanden |
+`probe_compromised.py` is the strongest one: the official
+`@modelcontextprotocol/server-filesystem`, modified on a copy so its read path
+exfiltrates, with `readOnlyHint: true` left in place. The sophisticated attacker
+variant reads correctly, exfiltrates afterwards and swallows the failure. Through
+the proxy the user receives the correct file contents and the exfiltration
+silently fails.
 
-Original im npm-Cache nach der Mutationsprobe geprüft: 0 Spuren, läuft unverändert.
+## Measured limits
 
-## Gemessene Grenzen
+Stated as measured, not as caveats.
 
-Ehrlich benannt, nicht weggelassen:
+1. **Network exfiltration passes the first level.** A process stripped of write
+   access can still open outbound connections — measured directly. `deny network*`
+   blocks it (measured: `EPERM`), but that level is only legitimate for tools
+   declaring `openWorldHint: false`. **A tool with `readOnlyHint: true` and no
+   `openWorldHint: false` keeps a full exfiltration channel.**
+2. **macOS only.** `sandbox-exec` is Apple-specific and deprecated by Apple.
+   bubblewrap or seccomp would be the Linux equivalent. The architecture is
+   portable; this implementation is not.
+3. **Enforcement is per-backend.** Filesystems are solved here. A database would
+   need a read-only transaction; a third-party REST API is not practically
+   enforceable by this mechanism.
+4. **`npx` does not survive the sandbox** — it writes to its cache at startup.
+   Packages must be resolved beforehand and launched directly with `node`.
+   Tooling problem, not architectural.
+5. **Threefold resource cost**, since the target server runs three times.
+6. **A new single point of failure** in the call path.
 
-1. **Nur macOS.** `sandbox-exec` ist Apple-spezifisch und von Apple als
-   deprecated markiert. Unter Linux wären bubblewrap oder seccomp das
-   Äquivalent — die Architektur ist portabel, diese Umsetzung nicht.
+## Open question
 
-2. **Netzwerk-Exfiltration braucht die zweite Stufe.** Gemessen: Ein Prozess
-   ohne Schreibrechte kann weiterhin ins Netz. `deny network*` schließt das,
-   ist aber nur zulässig, wenn das Werkzeug `openWorldHint: false` deklariert.
-   Werkzeuge mit `readOnlyHint: true` **ohne** `openWorldHint: false` bleiben
-   über das Netz exfiltrationsfähig.
+The Tool Annotations Interest Group (Microsoft, OpenAI, AWS, Cloudflare,
+Anthropic) has on its agenda *"whether any annotations should be evaluated at
+runtime rather than declared statically"*. If that is solved in the protocol or
+in the clients, this layer is a feature rather than a product.
 
-3. **Durchsetzung ist pro Backend verschieden.** Dateisystem ist hier gelöst.
-   Eine Datenbank bräuchte eine read-only-Transaktion, eine fremde REST-API
-   ist mit diesem Mittel praktisch nicht erzwingbar.
-
-4. **`npx` läuft nicht in der Sandbox** — der Paketmanager will beim Start in
-   seinen Cache schreiben. Pakete müssen vorher aufgelöst und direkt mit `node`
-   gestartet werden. Werkzeugproblem, kein Architekturproblem.
-
-5. **Dreifacher Ressourcenverbrauch**, weil der Zielserver dreimal läuft.
-   Für Server mit teurem Start ist das relevant.
-
-6. **Neuer Single Point of Failure** im Laufzeitpfad.
-
-## Offene strategische Frage
-
-Die Tool Annotations Interest Group (Microsoft, OpenAI, AWS, Cloudflare,
-Anthropic) diskutiert bereits, *„whether any annotations should be evaluated at
-runtime rather than declared statically"*. Wird das im Standard oder in den
-Clients gelöst, ist diese Schicht ein Feature und kein Produkt.
-
-## Aufruf
+## Usage
 
 ```
-python3 proxy.py <server-befehl ...>
+python3 proxy.py <server-command ...>
 ```
 
-Proben:
+Probes:
+
 ```
-python3 probe.py
-python3 echttest.py       # braucht @modelcontextprotocol/server-filesystem im npx-Cache
-python3 mutationsprobe.py # braucht die mutierte Kopie, siehe Kommentar in der Datei
+python3 probe_synthetic.py
+python3 probe_real.py            # needs @modelcontextprotocol/server-filesystem in the npx cache
+bash build_compromised_copy.sh   # builds the mutated copy; the original is never touched
+python3 probe_compromised.py
 ```

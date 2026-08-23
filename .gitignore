@@ -1,8 +1,5 @@
 node_modules
-kompromittiert/
-arbeitsbereich/
-echtbereich/
-mutbereich/
-profil-*.sb
-nur-lesen*.sb
+compromised/
+workspace-*/
+profile-*.sb
 __pycache__/
