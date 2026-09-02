@@ -7,11 +7,18 @@ proxy is useless in practice -- which is exactly the standing objection that
 enforcement is per-backend.
 
 Target: the official @modelcontextprotocol/server-filesystem
-  read_file  (readOnlyHint=True)  -> restrained instance, MUST work
+  read_file  (readOnlyHint=True)  -> a sandboxed instance, MUST work
   write_file (readOnlyHint=False) -> free instance, MUST work
+
+Which sandboxed instance a read-only tool lands in depends on the server's own
+declarations and therefore on its version, so it is never written down here.
+It is parsed back out of the proxy's routing log and printed as measured --
+an earlier version of this file printed a hardcoded "(restrained)" label that
+disagreed with the route actually taken.
 """
 import glob
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -64,6 +71,18 @@ def session(command, calls):
     return responses, finished.stderr
 
 
+def route_of(diagnostics, tool):
+    """The route the proxy actually took, read back from its own log.
+
+    Never label a call with the route it was expected to take: since
+    2026.7.10 the target server declares openWorldHint=false on every tool,
+    which sends read-only tools to STRICT rather than RESTRAINED. A hardcoded
+    label would have stated the opposite while the probe stayed green.
+    """
+    match = re.search(rf"tools/call '{re.escape(tool)}' -> (.+)", diagnostics)
+    return match.group(1).strip() if match else "route not logged"
+
+
 def summarise(response, width=90):
     if not response:
         return "(no response)"
@@ -89,8 +108,10 @@ responses, diagnostics = session(VIA_PROXY, CALLS)
 for line in diagnostics.splitlines():
     print(f"  {line}")
 print()
-print(f"  read_file  (restrained) : {summarise(responses.get(10))}")
-print(f"  write_file (free)       : {summarise(responses.get(11))}")
+print(f"  read_file  [{route_of(diagnostics, 'read_file')}]")
+print(f"    -> {summarise(responses.get(10))}")
+print(f"  write_file [{route_of(diagnostics, 'write_file')}]")
+print(f"    -> {summarise(responses.get(11))}")
 
 read_ok = responses.get(10) and not responses[10].get("result", {}).get("isError")
 write_ok = os.path.exists(os.path.join(WORKSPACE, "new.txt"))

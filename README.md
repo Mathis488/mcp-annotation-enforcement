@@ -74,7 +74,11 @@ Stated as measured, not as caveats.
    access can still open outbound connections — measured directly. `deny network*`
    blocks it (measured: `EPERM`), but that level is only legitimate for tools
    declaring `openWorldHint: false`. **A tool with `readOnlyHint: true` and no
-   `openWorldHint: false` keeps a full exfiltration channel.**
+   `openWorldHint: false` keeps a full exfiltration channel.** Measured as a
+   property of the sandbox profiles — *not* observed on the tested server, which
+   has declared `openWorldHint: false` on every tool since version 2026.7.10.
+   What the proxy enforces therefore depends on the target's catalog version;
+   the version-by-version measurement is limit 7 in the report.
 2. **macOS only.** `sandbox-exec` is Apple-specific and deprecated by Apple.
    bubblewrap or seccomp would be the Linux equivalent. The architecture is
    portable; this implementation is not.

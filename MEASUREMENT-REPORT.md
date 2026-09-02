@@ -131,14 +131,34 @@ would pass row two.
 
 ### Probe 2 — real server, unmodified
 
-`@modelcontextprotocol/server-filesystem`, 14 tools, 10 declaring
-`readOnlyHint: true`. All ten were detected and routed to a restrained instance
-with no configuration.
+`@modelcontextprotocol/server-filesystem` (version 2026.7.10), 14 tools, 10
+declaring `readOnlyHint: true`. All ten were detected and sandboxed with no
+configuration.
 
 | Check | Result |
 |---|---|
 | Read-only tool survives the sandbox | pass |
 | Write tool still functions | pass |
+
+**Correction (2026-09-02).** This section previously said the ten tools were
+routed to *a restrained instance*. They were not. Measured, from the proxy's own
+log:
+
+```
+[proxy] annotations read: 10 claim to be read-only, 10 of those also claim no outside world
+[proxy] tools/call 'read_file' -> STRICT (no writes, no network)
+```
+
+Since version 2026.7.10 this server declares `openWorldHint: false` on all
+fourteen tools, so every read-only tool lands in the strict instance instead.
+Neither check above changes. What changes is coverage: **the restrained level is
+never exercised by a real server in this report.** Only the synthetic liar in
+probe 1 reaches it, and that server declares no `openWorldHint` at all.
+
+The error was a hardcoded `(restrained)` label in `probe_real.py` that stated the
+expected route rather than the taken one, while the probe stayed green either
+way. The label now parses the route back out of the proxy's log and prints
+`route not logged` if it cannot find one.
 
 ### Probe 3 — real server, compromised
 
@@ -181,6 +201,10 @@ only legitimate for tools declaring `openWorldHint: false`. **A tool declaring
 `readOnlyHint: true` without `openWorldHint: false` remains able to exfiltrate over
 the network.** This is the most significant gap in the current design.
 
+That gap is a property of the sandbox profiles, measured as such. It was **not**
+observed on the server this report tests, and the reason is a moving target —
+see limit 7.
+
 **2. macOS only.** `sandbox-exec` is Apple-specific and deprecated by Apple.
 bubblewrap or seccomp would be the Linux equivalent. The architecture is portable;
 this implementation is not.
@@ -200,9 +224,62 @@ for servers with expensive startup.
 
 **6. A new single point of failure** in the call path.
 
+**7. The routing depends on the target's catalog version, and that version moves.**
+The proxy keys on the *presence* of an annotation, so what it enforces changes when
+the server changes what it declares — silently, because the probes are green
+either way. Measured over seven published versions of the one server tested
+(npm, 2026-09-02):
+
+| version | published | tools | `readOnlyHint` | `openWorldHint` |
+|---|---|---|---|---|
+| 2025.1.14 | 2025-01-14 | 11 | — | — |
+| 2025.7.29 | 2025-07-31 | 14 | — | — |
+| 2025.11.25 | 2025-11-25 | 14 | 14 (10 true) | — |
+| 2026.1.14 | 2026-01-14 | 14 | 14 (10 true) | — |
+| 2026.7.4 | 2026-07-04 | 14 | 14 (10 true) | — |
+| 2026.7.10 | 2026-07-10 | 14 | 14 (10 true) | 14 (all false) |
+| 2026.8.31 | 2026-08-31 | 14 | 14 (10 true) | 14 (all false) |
+
+Three consequences, none of which I saw while measuring:
+
+- Against the first two versions the proxy routes **nothing**. There are no
+  annotations to route on, so all tools go to the free instance. It starts,
+  breaks nothing, reports nothing and enforces nothing — indistinguishable from
+  enforcement working.
+- The shape limit 1 warns about — `readOnlyHint: true` without
+  `openWorldHint: false` — is what this catalog stopped having on 2026-07-10,
+  44 days before this report was published. Every version before that date had it
+  on every tool.
+- The catalog grew 11 → 14 under a stable package name and namespace
+  (`read_text_file`, `read_media_file`, `list_directory_with_sizes` added during
+  2025; nothing ever removed). Any rule written against the eleven-tool catalog
+  was complete when written and incomplete afterwards, and looks the same in both
+  states.
+
+Reproduction:
+
+```
+for v in 2025.1.14 2025.7.29 2025.11.25 2026.1.14 2026.7.4 2026.7.10 2026.8.31; do
+  npm pack @modelcontextprotocol/server-filesystem@$v >/dev/null 2>&1
+  tar xzf *-$v.tgz
+  printf '%-12s tools=%-3s readOnlyHint=%-3s (true=%s) openWorldHint=%-3s (false=%s)\n' "$v" \
+    "$(grep -ohE '"[a-z]+_[a-z_]+"' package/dist/*.js | sort -u | wc -l | tr -d ' ')" \
+    "$(grep -oh readOnlyHint package/dist/*.js | wc -l | tr -d ' ')" \
+    "$(grep -ohE 'readOnlyHint: *true' package/dist/*.js | wc -l | tr -d ' ')" \
+    "$(grep -oh openWorldHint package/dist/*.js | wc -l | tr -d ' ')" \
+    "$(grep -ohE 'openWorldHint: *false' package/dist/*.js | wc -l | tr -d ' ')"
+  rm -rf package *.tgz
+done
+```
+
+The tool count is a grep over snake_case string literals in `dist`, not a
+`tools/list` call; it agrees with an explicit name diff for every version above.
+
 ## What this does not prove
 
-- Not measured on any server other than the filesystem reference server.
+- Not measured on any server other than the filesystem reference server, and on
+  that one, not on any catalog version other than 2026.7.10 at the time of
+  writing. See limit 7 for what that omission cost.
 - Latency was not measured.
 - No claim that dishonest annotations are common in the wild. This report measures
   what happens *when* a server lies, not *how often* they do.
