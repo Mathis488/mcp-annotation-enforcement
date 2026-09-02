@@ -24,8 +24,57 @@ import shutil
 import subprocess
 import sys
 
+def route_of(diagnostics, tool):
+    """The route the proxy actually took, read back from its own log.
+
+    Never label a call with the route it was expected to take: since
+    2026.7.10 the target server declares openWorldHint=false on every tool,
+    which sends read-only tools to STRICT rather than RESTRAINED. A hardcoded
+    label would have stated the opposite while the probe stayed green.
+    """
+    match = re.search(rf"tools/call '{re.escape(tool)}' -> (.+)", diagnostics)
+    return match.group(1).strip() if match else "route not logged"
+
+
+def _selftest():
+    """Red probes for route_of. Run: python3 probe_real.py --selftest
+
+    The bug this file shipped with was a label that stated a route instead of
+    reading one, so the parser is checked against both routes AND against the
+    case where there is nothing to read.
+    """
+    cases = [
+        ("[proxy] tools/call 'read_file' -> STRICT (no writes, no network)",
+         "read_file", "STRICT (no writes, no network)"),
+        ("[proxy] tools/call 'read_note' -> RESTRAINED (no writes)",
+         "read_note", "RESTRAINED (no writes)"),
+        ("[proxy] tools/call 'write_file' -> free", "write_file", "free"),
+        # Red probe: no log line for this tool. Must say so, not guess.
+        ("[proxy] tools/call 'read_file' -> STRICT (no writes, no network)",
+         "other_tool", "route not logged"),
+        ("", "read_file", "route not logged"),
+    ]
+    failures = 0
+    for log, tool, expected in cases:
+        got = route_of(log, tool)
+        ok = got == expected
+        failures += not ok
+        print(f"  [{'x' if ok else ' '}] {tool!r:14} -> {got!r}")
+    # The original defect, stated directly: a STRICT log must never read as
+    # restrained. This is the assertion the hardcoded label could not make.
+    strict_log = "[proxy] tools/call 'read_file' -> STRICT (no writes, no network)"
+    mislabelled = "restrained" in route_of(strict_log, "read_file").lower()
+    failures += mislabelled
+    print(f"  [{' ' if mislabelled else 'x'}] a STRICT route never reads as restrained")
+    print("SELFTEST", "FAILED" if failures else "PASSED")
+    return 1 if failures else 0
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.path.join(HERE, "workspace-real")
+
+if "--selftest" in sys.argv:
+    sys.exit(_selftest())
 
 shutil.rmtree(WORKSPACE, ignore_errors=True)
 os.makedirs(WORKSPACE)
@@ -69,18 +118,6 @@ def session(command, calls):
         if message.get("id") is not None:
             responses[message["id"]] = message
     return responses, finished.stderr
-
-
-def route_of(diagnostics, tool):
-    """The route the proxy actually took, read back from its own log.
-
-    Never label a call with the route it was expected to take: since
-    2026.7.10 the target server declares openWorldHint=false on every tool,
-    which sends read-only tools to STRICT rather than RESTRAINED. A hardcoded
-    label would have stated the opposite while the probe stayed green.
-    """
-    match = re.search(rf"tools/call '{re.escape(tool)}' -> (.+)", diagnostics)
-    return match.group(1).strip() if match else "route not logged"
 
 
 def summarise(response, width=90):
