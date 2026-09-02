@@ -1,5 +1,10 @@
-<!-- DRAFT — reply to Santoshkumarpuppala's comment of 2026-08-31 in discussion #3299.
-     NOT POSTED. All figures measured 2026-09-02, reproduction command at the end. -->
+<!-- POSTED 2026-09-02 as discussion comment 18247028 on #3299
+     https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/3299#discussioncomment-18247028
+     Reply to Santoshkumarpuppala's comment of 2026-08-31.
+     All figures measured 2026-09-02, reproduction command at the end.
+     NOTE: the posted version still carries the pre-Codex cleanup ('rm -rf package *.tgz'),
+     which deletes unrelated files when run in a non-empty directory. Fixed here; the
+     public comment needs the same edit. -->
 
 @Santoshkumarpuppala — the part of your comment worth keeping is the generalisation, and I
 think it is wider than either of our cases.
@@ -85,17 +90,19 @@ error, yours produces nothing.
 Reproduction for the table:
 
 ```
+d=$(mktemp -d) && cd "$d" || exit 1
 for v in 2025.1.14 2025.7.29 2025.11.25 2026.1.14 2026.7.4 2026.7.10 2026.8.31; do
-  npm pack @modelcontextprotocol/server-filesystem@$v >/dev/null 2>&1
-  tar xzf *-$v.tgz
+  f=$(npm pack @modelcontextprotocol/server-filesystem@$v 2>/dev/null | tail -1)
+  tar xzf "$f" && rm -f "$f"
   printf '%-12s tools=%-3s readOnlyHint=%-3s (true=%s) openWorldHint=%-3s (false=%s)\n' "$v" \
     "$(grep -ohE '"[a-z]+_[a-z_]+"' package/dist/*.js | sort -u | wc -l | tr -d ' ')" \
     "$(grep -oh readOnlyHint package/dist/*.js | wc -l | tr -d ' ')" \
     "$(grep -ohE 'readOnlyHint: *true' package/dist/*.js | wc -l | tr -d ' ')" \
     "$(grep -oh openWorldHint package/dist/*.js | wc -l | tr -d ' ')" \
     "$(grep -ohE 'openWorldHint: *false' package/dist/*.js | wc -l | tr -d ' ')"
-  rm -rf package *.tgz
+  rm -rf package
 done
+cd /; rm -rf "$d"
 ```
 
 The tool count is a grep over snake_case string literals in `dist`, not a `tools/list` call; it

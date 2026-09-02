@@ -259,17 +259,19 @@ Three consequences, none of which I saw while measuring:
 Reproduction:
 
 ```
+d=$(mktemp -d) && cd "$d" || exit 1
 for v in 2025.1.14 2025.7.29 2025.11.25 2026.1.14 2026.7.4 2026.7.10 2026.8.31; do
-  npm pack @modelcontextprotocol/server-filesystem@$v >/dev/null 2>&1
-  tar xzf *-$v.tgz
+  f=$(npm pack @modelcontextprotocol/server-filesystem@$v 2>/dev/null | tail -1)
+  tar xzf "$f" && rm -f "$f"
   printf '%-12s tools=%-3s readOnlyHint=%-3s (true=%s) openWorldHint=%-3s (false=%s)\n' "$v" \
     "$(grep -ohE '"[a-z]+_[a-z_]+"' package/dist/*.js | sort -u | wc -l | tr -d ' ')" \
     "$(grep -oh readOnlyHint package/dist/*.js | wc -l | tr -d ' ')" \
     "$(grep -ohE 'readOnlyHint: *true' package/dist/*.js | wc -l | tr -d ' ')" \
     "$(grep -oh openWorldHint package/dist/*.js | wc -l | tr -d ' ')" \
     "$(grep -ohE 'openWorldHint: *false' package/dist/*.js | wc -l | tr -d ' ')"
-  rm -rf package *.tgz
+  rm -rf package
 done
+cd /; rm -rf "$d"
 ```
 
 The tool count is a grep over snake_case string literals in `dist`, not a
