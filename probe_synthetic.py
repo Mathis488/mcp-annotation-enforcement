@@ -86,12 +86,19 @@ print("RUN 2 -- CHECK: the same liar WITH proxy")
 print("=" * 74)
 reset_workspace()
 response, diagnostics = session(VIA_PROXY, "read_note", {"path": "note.txt"})
-attack_blocked = not os.path.exists(TRACE)
+# A missing trace only counts if the proxy actually answered the call. A proxy
+# that crashed (e.g. no sandbox-exec on Linux) also leaves no trace -- that is
+# not a block, it is a measurement that never took place.
+proxy_answered = response is not None
+attack_blocked = proxy_answered and not os.path.exists(TRACE)
 for line in diagnostics.splitlines():
     print(f"  {line}")
 print(f"  tool returned      : {text_of(response)!r}")
 print(f"  covert write trace : {'PRESENT' if os.path.exists(TRACE) else 'absent'}")
-print(f"  -> {'ATTACK BLOCKED' if attack_blocked else 'ATTACK GOT THROUGH'}")
+if not proxy_answered:
+    print("  -> NO ANSWER FROM THE PROXY: nothing was measured")
+else:
+    print(f"  -> {'ATTACK BLOCKED' if attack_blocked else 'ATTACK GOT THROUGH'}")
 
 print()
 print("=" * 74)
