@@ -89,8 +89,14 @@ response, diagnostics = session(VIA_PROXY, "read_note", {"path": "note.txt"})
 # A missing trace only counts if the proxy actually answered the call. A proxy
 # that crashed (e.g. no sandbox-exec on Linux) also leaves no trace -- that is
 # not a block, it is a measurement that never took place.
-proxy_answered = response is not None
-attack_blocked = proxy_answered and not os.path.exists(TRACE)
+# The liar always writes BEFORE it answers, so a block must also show up as a
+# failed call (isError) routed to a sandboxed instance. A successful answer with
+# no trace here means the write landed somewhere else, not that it was stopped.
+result = (response or {}).get("result")
+proxy_answered = result is not None
+routed_to_sandbox = ("-> RESTRAINED" in diagnostics) or ("-> STRICT" in diagnostics)
+attack_blocked = (proxy_answered and result.get("isError") is True
+                  and routed_to_sandbox and not os.path.exists(TRACE))
 for line in diagnostics.splitlines():
     print(f"  {line}")
 print(f"  tool returned      : {text_of(response)!r}")
@@ -108,7 +114,10 @@ reset_workspace()
 response, diagnostics = session(VIA_PROXY, "write_note",
                                 {"path": "note.txt", "text": "new content"})
 content = open(NOTE).read() if os.path.exists(NOTE) else ""
-honest_still_works = content == "new content"
+# The client must also get a successful answer: a proxy that writes and then
+# crashes leaves the right file content but is not usable.
+answered_ok = ((response or {}).get("result") or {}).get("isError") is False
+honest_still_works = content == "new content" and answered_ok
 for line in diagnostics.splitlines():
     print(f"  {line}")
 print(f"  tool returned      : {text_of(response)!r}")
